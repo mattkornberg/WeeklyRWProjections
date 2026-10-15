@@ -200,6 +200,9 @@
   .standings-record .loss { color: var(--red-tint); }
   .sparkline-cell { width: 90px; }
   .power-score { color: var(--amber); font-weight: 700; }
+  .luck-pos { color: var(--green); font-weight: 600; }
+  .luck-neg { color: var(--red-tint); font-weight: 600; }
+  .luck-neutral { color: var(--muted); }
   .awards-week-picker {
     display: flex;
     gap: 6px;
@@ -919,12 +922,18 @@ function powerRankedTeams(conf) {
     const apGames = t.allPlayWins + t.allPlayLosses;
     const apPct = apGames ? t.allPlayWins / apGames : 0;
     const powerScore = (winPct * 0.75 + apPct * 0.25) * 100;
+    // Luck: actual wins vs. "expected" wins if this team's weekly scores had
+    // been judged against the whole conference's field each week (all-play
+    // pace) rather than just their single scheduled opponent. Positive means
+    // the schedule has been kind; negative means they're outscoring their record.
+    const expectedWins = apGames ? apPct * games : 0;
+    const luck = t.wins - expectedWins;
     return {
       name, wins: t.wins, losses: t.losses, pf: t.pf, pa: t.pa,
       avg: games ? t.pf / games : 0,
       allPlayWins: t.allPlayWins, allPlayLosses: t.allPlayLosses,
       weekly: t.weekly.sort((a, b) => a.week - b.week),
-      powerScore
+      powerScore, expectedWins, luck
     };
   });
   rows.sort((a, b) => b.powerScore - a.powerScore);
@@ -947,6 +956,12 @@ function sparklineSvg(weekly) {
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
 }
 
+function luckLabel(luck) {
+  const sign = luck > 0 ? '+' : '';
+  const cls = luck > 0.4 ? 'luck-pos' : luck < -0.4 ? 'luck-neg' : 'luck-neutral';
+  return `<span class="${cls}">${sign}${luck.toFixed(1)}</span>`;
+}
+
 function renderStandings(conf) {
   const rows = powerRankedTeams(conf);
   if (!rows.length) return '<p style="color:var(--muted);">No completed games yet.</p>';
@@ -959,13 +974,14 @@ function renderStandings(conf) {
       <td>${r.pa.toFixed(1)}</td>
       <td>${r.avg.toFixed(1)}</td>
       <td>${r.allPlayWins}-${r.allPlayLosses}</td>
+      <td title="Actual wins minus expected wins (all-play win% × games played)">${luckLabel(r.luck)}</td>
       <td class="power-score">${r.powerScore.toFixed(1)}</td>
       <td class="sparkline-cell">${sparklineSvg(r.weekly)}</td>
     </tr>`).join('');
   return `
     <table class="standings-table">
       <thead><tr>
-        <th>#</th><th>Team</th><th>Record</th><th>PF</th><th>PA</th><th>Avg</th><th>All-Play</th><th>Power</th><th>Trend</th>
+        <th>#</th><th>Team</th><th>Record</th><th>PF</th><th>PA</th><th>Avg</th><th>All-Play</th><th>Luck</th><th>Power</th><th>Trend</th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table>`;
@@ -1091,6 +1107,29 @@ function renderPredictionRecord() {
     </div>`;
 }
 
+function renderLuckAwards(conf) {
+  const rows = powerRankedTeams(conf).filter(r => (r.wins + r.losses) >= 2);
+  if (rows.length < 2) return '';
+  const luckiest = [...rows].sort((a, b) => b.luck - a.luck)[0];
+  const unluckiest = [...rows].sort((a, b) => a.luck - b.luck)[0];
+  const cards = [
+    {
+      label: 'Luckiest', team: luckiest.name,
+      detail: `${luckiest.wins}-${luckiest.losses} actual · ${luckiest.allPlayWins}-${luckiest.allPlayLosses} all-play · ${luckLabel(luckiest.luck)} wins above expected`
+    },
+    {
+      label: 'Unluckiest', team: unluckiest.name,
+      detail: `${unluckiest.wins}-${unluckiest.losses} actual · ${unluckiest.allPlayWins}-${unluckiest.allPlayLosses} all-play · ${luckLabel(unluckiest.luck)} wins vs. expected`
+    },
+  ];
+  return `<div class="awards-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));">${cards.map(c => `
+    <div class="award-card">
+      <div class="award-label">${c.label}</div>
+      <div class="award-team">${c.team}</div>
+      <div class="award-detail">${c.detail}</div>
+    </div>`).join('')}</div>`;
+}
+
 function renderSeasonHub() {
   const el = document.getElementById('seasonHub');
   const weekPicker = WEEKS_WITH_DATA.map(w => `<button class="awards-week-btn${w === awardsWeek ? ' active' : ''}" onclick="awardsWeek=${w};renderAll();">Wk ${w}</button>`).join('');
@@ -1100,7 +1139,10 @@ function renderSeasonHub() {
 
     <div class="hub-section-title">Standings &amp; Power Rankings — ${currentConf}</div>
     ${renderStandings(currentConf)}
-    <p class="allplay-note">Power score blends actual win% (75%) with all-play win% (25%) — how a team would have done against every other team in the conference each week.</p>
+    <p class="allplay-note">Power score blends actual win% (75%) with all-play win% (25%) — how a team would have done against every other team in the conference each week. Luck = actual wins minus expected wins (all-play win% × games played) — positive means the schedule has been kind, negative means the team is outscoring its record.</p>
+
+    <div class="hub-section-title">Luck of the Draw — ${currentConf}</div>
+    ${renderLuckAwards(currentConf)}
 
     <div class="hub-section-title">Weekly Awards — ${currentConf}</div>
     <div class="awards-week-picker">${weekPicker}</div>
