@@ -1068,6 +1068,8 @@ function computePredictionRecord() {
   const overall = { correct: 0, total: 0 };
   const byWeek = {};
   const byConf = {};
+  const ungradedByWeek = {};
+  DATA.forEach(m => { if (!m.pending && typeof m.predictedCorrect !== 'boolean') ungradedByWeek[m.week] = (ungradedByWeek[m.week] || 0) + 1; });
   completed.forEach(m => {
     overall.total++;
     if (m.predictedCorrect) overall.correct++;
@@ -1080,7 +1082,7 @@ function computePredictionRecord() {
     byConf[m.conf].total++;
     if (m.predictedCorrect) byConf[m.conf].correct++;
   });
-  return { overall, byWeek, byConf };
+  return { overall, byWeek, byConf, ungradedByWeek };
 }
 
 function pct(correct, total) {
@@ -1093,7 +1095,7 @@ function renderPredictionRecord() {
 
   const weekRows = Object.keys(rec.byWeek).map(Number).sort((a, b) => a - b).map(w => {
     const r = rec.byWeek[w];
-    return `<tr><td>Week ${w}</td><td>${r.correct}-${r.total - r.correct}</td><td>${pct(r.correct, r.total)}%</td></tr>`;
+    return `<tr><td>Week ${w}</td><td>${r.correct}-${r.total - r.correct}${rec.ungradedByWeek[w] ? ` <span style="color:var(--muted);font-size:12px">+${rec.ungradedByWeek[w]} ungraded = ${r.total + rec.ungradedByWeek[w]}</span>` : ''}</td><td>${pct(r.correct, r.total)}%</td></tr>`;
   }).join('');
 
   const confRows = ['TT', 'DD', 'RR', 'PP'].filter(c => rec.byConf[c]).map(c => {
@@ -1180,13 +1182,14 @@ function renderConfToggle() {
 
 function computeWeekRecord() {
   const weekMatchups = DATA.filter(m => m.week === currentWeek);
-  let correct = 0, incorrect = 0, pending = 0, noLineups = weekMatchups.length === 0;
+  let correct = 0, incorrect = 0, pending = 0, ungraded = 0;
   weekMatchups.forEach(m => {
     if (m.pending) pending++;
-    else if (m.predictedCorrect) correct++;
-    else incorrect++;
+    else if (m.predictedCorrect === true) correct++;
+    else if (m.predictedCorrect === false) incorrect++;
+    else ungraded++;   // finished, but a lineup was missing so no prediction to grade
   });
-  return { correct, incorrect, pending, total: weekMatchups.length };
+  return { correct, incorrect, pending, ungraded, total: weekMatchups.length };
 }
 
 function renderRecordBanner() {
@@ -1207,6 +1210,7 @@ function renderRecordBanner() {
       <div class="record-title">Prediction Record — Week ${currentWeek}${decided === 0 ? ' (lineups still coming in)' : ''}</div>
       <div class="record-score"><span class="win">${r.correct}</span>-<span class="loss">${r.incorrect}</span> ${decided > 0 ? '<span style="color:var(--muted);font-size:15px">straight-up</span>' : ''}</div>
     </div>
+    ${r.ungraded > 0 ? `<div class="record-pending">${r.ungraded} of ${r.total} not graded (a lineup was missing) &middot; ${r.correct + r.incorrect + r.ungraded + r.pending} total</div>` : ''}
     ${r.pending > 0 ? `<div class="record-pending">${r.pending} of ${r.total} matchup${r.total === 1 ? '' : 's'} still pending${decided === 0 ? ' — waiting on more lineups / results' : ' (live game in progress)'}</div>` : ''}
   </div>`;
 }
