@@ -162,6 +162,7 @@
     border-color: var(--text);
   }
   .mode-btn:hover:not(.active) { border-color: var(--green); color: var(--text); }
+  @media (max-width: 520px) { .mode-toggle { padding: 0 12px; gap: 6px; } .mode-btn { flex: 1; font-size: 17px; padding: 9px 6px; } }
 
   .season-hub {
     max-width: 960px;
@@ -699,6 +700,28 @@
     .group-cols { padding: 0 8px; }
     .scoreboard { padding: 14px 8px; }
   }
+  .mid-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .mid-sub { color: var(--muted); font-size: 11px; }
+  .odds-bar { display: inline-block; width: 70px; height: 7px; background: var(--line); border-radius: 4px; vertical-align: middle; overflow: hidden; margin-right: 6px; }
+  .odds-bar > div { height: 100%; background: var(--green); }
+  .recap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; }
+  .recap-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .recap-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .recap-name { font-weight: 700; }
+  .recap-sub { color: var(--muted); font-size: 12px; }
+  .recap-head { position: relative; }
+  .tier { margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 10px; white-space: nowrap; }
+  .tier-good { background: rgba(76,154,91,.2); color: var(--green); }
+  .tier-mid { background: rgba(232,163,61,.2); color: var(--amber); }
+  .tier-bad { background: rgba(201,107,92,.2); color: var(--red-tint); }
+  .mid-wi-pick { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+  .mid-wi-pick label { font-size: 13px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; flex: 1 1 220px; }
+  .mid-wi-pick select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 14px; }
+  .mid-wi-head { margin: 4px 0 8px; font-size: 14px; }
+  .recap-line { color: var(--text); opacity: .85; font-size: 13px; margin: 0 0 8px; }
+  .mid-stat { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 3px 0; border-top: 1px solid var(--line); }
+  .mid-stat span { color: var(--muted); white-space: nowrap; }
+  .mid-stat b { font-weight: 600; text-align: right; }
 </style>
 </head>
 <body>
@@ -720,6 +743,7 @@
 <div class="league-section" id="leagueSection"></div>
 
 <div class="season-hub" id="seasonHub" style="display:none;"></div>
+<div class="season-hub" id="midseason" style="display:none;"></div>
 
 <footer>
   Scoring uses the verified Roster Wars formulas (PPR + rushing for RB/WR, 1.5/rec TE premium, position-weighted IDP, distance-scaled kicker). Point values are converted from live Week 1 stat projections, not the preseason <code>pts_proj</code> baseline. The amber dot marks the closest projected matchup in each conference. Use the arrows to step through positions — the tally below tracks the running score through however far you've gone. Actual results reflect final locked rosters, which occasionally differ from the lineups used for the prediction if a manager made a late swap.
@@ -864,7 +888,7 @@ function confMatchups(conf) {
 function renderModeToggle() {
   const el = document.getElementById('modeToggle');
   el.innerHTML = '';
-  [['matchups', 'Matchups'], ['season', 'Season Hub']].forEach(([mode, label]) => {
+  [['matchups', 'Matchups'], ['season', 'Season Hub'], ['midseason', 'Midseason']].forEach(([mode, label]) => {
     const btn = document.createElement('button');
     btn.className = 'mode-btn' + (mode === currentMode ? ' active' : '');
     btn.textContent = label;
@@ -1442,8 +1466,19 @@ function renderAll() {
   const mainEl = document.getElementById('main');
   const leagueSectionEl = document.getElementById('leagueSection');
   const seasonHubEl = document.getElementById('seasonHub');
+  const midEl = document.getElementById('midseason');
+  midEl.style.display = 'none';
 
-  if (currentMode === 'season') {
+  if (currentMode === 'midseason') {
+    weekRowEl.style.display = 'none';
+    recordBannerEl.style.display = 'none';
+    matchupRowEl.style.display = 'none';
+    mainEl.style.display = 'none';
+    leagueSectionEl.style.display = 'none';
+    seasonHubEl.style.display = 'none';
+    midEl.style.display = '';
+    renderMidseason();
+  } else if (currentMode === 'season') {
     weekRowEl.style.display = 'none';
     recordBannerEl.style.display = 'none';
     matchupRowEl.style.display = 'none';
@@ -1464,6 +1499,343 @@ function renderAll() {
     renderMain();
     renderLeagueSection();
   }
+}
+
+// ===================================================================
+// MIDSEASON tab: awards, schedule what-ifs, playoff odds, power
+// rankings with movement, and a recap card for every team. Everything
+// is computed in the browser from DATA, so it updates as weeks finalize.
+// ===================================================================
+const REG_SEASON_WEEKS = 14;   // last regular-season week (edit if your league differs)
+const PLAYOFF_TEAMS = 6;       // playoff spots per conference (edit if your league differs)
+const SIM_RUNS = 5000;
+
+function midGames() {
+  // conf -> team -> [{week, opp, pf, pa, projFor, projAgainst, win, correct}]
+  const out = {};
+  DATA.forEach(m => {
+    if (m.pending || typeof m.actualTotalA !== 'number' || typeof m.actualTotalB !== 'number') return;
+    const a = stripConf(m.teamA), b = stripConf(m.teamB);
+    out[m.conf] = out[m.conf] || {};
+    [[a, b, m.actualTotalA, m.actualTotalB, m.totalA, m.totalB],
+     [b, a, m.actualTotalB, m.actualTotalA, m.totalB, m.totalA]].forEach(([t, o, pf, pa, prf, pra]) => {
+      (out[m.conf][t] = out[m.conf][t] || []).push({
+        week: m.week, opp: o, pf, pa, projFor: prf, projAgainst: pra, win: pf > pa,
+        correct: typeof m.predictedCorrect === 'boolean' ? m.predictedCorrect : null, m });
+    });
+  });
+  Object.values(out).forEach(c => Object.values(c).forEach(g => g.sort((x, y) => x.week - y.week)));
+  return out;
+}
+function midMean(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0; }
+function midSd(a) {
+  if (a.length < 2) return 0;
+  const m = midMean(a);
+  return Math.sqrt(a.reduce((s, x) => s + (x - m) * (x - m), 0) / (a.length - 1));
+}
+
+// Power table using only games through maxWeek
+function midTable(conf, maxWeek, G) {
+  const teams = (G[conf] || {});
+  const names = Object.keys(teams);
+  const rows = names.map(t => {
+    const g = teams[t].filter(x => x.week <= maxWeek);
+    const w = g.filter(x => x.win).length;
+    let apW = 0, apG = 0;
+    g.forEach(x => {
+      names.forEach(o => {
+        if (o === t) return;
+        const og = teams[o].find(y => y.week === x.week);
+        if (!og) return;
+        apG++; if (x.pf > og.pf) apW++;
+      });
+    });
+    const winPct = g.length ? w / g.length : 0, apPct = apG ? apW / apG : 0;
+    return { name: t, g, wins: w, losses: g.length - w, pf: g.reduce((s, x) => s + x.pf, 0),
+      pa: g.reduce((s, x) => s + x.pa, 0), apW, apL: apG - apW, apPct,
+      power: (winPct * 0.75 + apPct * 0.25) * 100 };
+  });
+  rows.sort((a, b) => b.power - a.power || b.pf - a.pf);
+  rows.forEach((r, i) => { r.rank = i + 1; });
+  return rows;
+}
+
+function midLastWeek(G, conf) {
+  const ws = Object.values(G[conf] || {}).map(g => g.length ? g[g.length - 1].week : 0);
+  return ws.length ? Math.max(...ws) : 0;
+}
+
+// ---------- playoff odds (Monte Carlo) ----------
+function midRandn() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+function midOdds(conf, G) {
+  const rows = midTable(conf, 99, G);
+  if (!rows.length) return null;
+  const played = Math.max(...rows.map(r => r.g.length));
+  const remaining = Math.max(0, REG_SEASON_WEEKS - played);
+  const all = rows.flatMap(r => r.g.map(x => x.pf));
+  const cMean = midMean(all);
+  const pooled = Math.max(25, Math.sqrt(midMean(rows.filter(r => r.g.length > 1).map(r => { const s = midSd(r.g.map(x => x.pf)); return s * s; }))) || 35);
+  const sims = rows.map(r => ({ name: r.name, wins: r.wins, pf: r.pf,
+    mu: (r.g.length * midMean(r.g.map(x => x.pf)) + 4 * cMean) / (r.g.length + 4) }));
+  const res = {}; sims.forEach(s => { res[s.name] = { playoff: 0, top1: 0, bye: 0, wins: 0 }; });
+  const n = sims.length, spots = Math.min(PLAYOFF_TEAMS, n);
+  for (let k = 0; k < SIM_RUNS; k++) {
+    const w = sims.map(s => s.wins), pf = sims.map(s => s.pf);
+    for (let wk = 0; wk < remaining; wk++) {
+      const idx = [...Array(n).keys()];
+      for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+      for (let i = 0; i + 1 < n; i += 2) {
+        const a = idx[i], b = idx[i + 1];
+        const sa = sims[a].mu + pooled * midRandn(), sb = sims[b].mu + pooled * midRandn();
+        pf[a] += sa; pf[b] += sb;
+        if (sa > sb) w[a]++; else w[b]++;
+      }
+    }
+    const order = [...Array(n).keys()].sort((a, b) => w[b] - w[a] || pf[b] - pf[a]);
+    order.forEach((ti, pos) => {
+      const r = res[sims[ti].name];
+      if (pos < spots) r.playoff++;
+      if (pos === 0) r.top1++;
+      if (pos < 2) r.bye++;
+    });
+    sims.forEach((s, i) => { res[s.name].wins += w[i]; });
+  }
+  Object.keys(res).forEach(t => {
+    res[t] = { playoff: res[t].playoff / SIM_RUNS, top1: res[t].top1 / SIM_RUNS, bye: res[t].bye / SIM_RUNS, wins: res[t].wins / SIM_RUNS };
+  });
+  return { res, remaining, played };
+}
+
+// ---------- player stats per team ----------
+function midPlayers(conf) {
+  const out = {}; // team -> {mvp, best, bust}
+  DATA.forEach(m => {
+    if (m.pending || m.conf !== conf) return;
+    [['a', stripConf(m.teamA)], ['b', stripConf(m.teamB)]].forEach(([side, t]) => {
+      const o = out[t] = out[t] || { tot: {}, games: [] };
+      m.groups.forEach(g => (g[side] || []).forEach(p => {
+        const act = getPlayerActual(p);
+        if (act === null) return;
+        o.tot[p.name] = (o.tot[p.name] || 0) + act;
+        o.games.push({ name: p.name, pos: p.pos, week: m.week, act, proj: p.pts, diff: act - p.pts });
+      }));
+    });
+  });
+  return out;
+}
+
+function midAwards(conf, G) {
+  const rows = midTable(conf, 99, G).filter(r => r.g.length >= 2);
+  if (rows.length < 2) return '';
+  const cards = [];
+  const add = (label, team, detail) => cards.push({ label, team, detail });
+  const over = rows.map(r => ({ r, d: midMean(r.g.map(x => x.pf - x.projFor)) })).sort((a, b) => b.d - a.d);
+  add('Overachiever', over[0].r.name, `Beats our projection by ${over[0].d.toFixed(1)} pts a week on average`);
+  add('Underachiever', over[over.length - 1].r.name, `Falls ${Math.abs(over[over.length - 1].d).toFixed(1)} pts a week short of our projection`);
+  const all = rows.flatMap(r => r.g.map(x => ({ t: r.name, ...x })));
+  const hi = [...all].sort((a, b) => b.pf - a.pf)[0], lo = [...all].sort((a, b) => a.pf - b.pf)[0];
+  add('Season-high score', hi.t, `${hi.pf.toFixed(1)} in Week ${hi.week} vs ${hi.opp}`);
+  add('Season-low score', lo.t, `${lo.pf.toFixed(1)} in Week ${lo.week} vs ${lo.opp}`);
+  const ups = all.filter(x => x.win && x.projFor < x.projAgainst).sort((a, b) => (b.projAgainst - b.projFor) - (a.projAgainst - a.projFor))[0];
+  if (ups) add('Biggest upset', ups.t, `Won Week ${ups.week} vs ${ups.opp} despite being projected ${(ups.projAgainst - ups.projFor).toFixed(1)} behind`);
+  const heart = all.filter(x => !x.win).sort((a, b) => (a.pa - a.pf) - (b.pa - b.pf))[0];
+  if (heart) add('Heartbreaker', heart.t, `Lost Week ${heart.week} to ${heart.opp} by just ${(heart.pa - heart.pf).toFixed(1)}`);
+  const blow = all.filter(x => x.win).sort((a, b) => (b.pf - b.pa) - (a.pf - a.pa))[0];
+  if (blow) add('Biggest blowout', blow.t, `Won Week ${blow.week} vs ${blow.opp} by ${(blow.pf - blow.pa).toFixed(1)}`);
+  const sds = rows.filter(r => r.g.length >= 3).map(r => ({ r, s: midSd(r.g.map(x => x.pf)) })).sort((a, b) => a.s - b.s);
+  if (sds.length > 1) {
+    add('Steady Eddie', sds[0].r.name, `Weekly scores vary by only ±${sds[0].s.toFixed(1)}`);
+    add('Boom or bust', sds[sds.length - 1].r.name, `Weekly scores swing ±${sds[sds.length - 1].s.toFixed(1)}`);
+  }
+  const P = midPlayers(conf);
+  let bestG = null, worstG = null;
+  Object.keys(P).forEach(t => P[t].games.forEach(g => {
+    if (!bestG || g.diff > bestG.diff) bestG = { t, ...g };
+    if (g.proj >= 8 && (!worstG || g.diff < worstG.diff)) worstG = { t, ...g };
+  }));
+  if (bestG) add('Best player game', bestG.t, `${bestG.name} (${bestG.pos}) put up ${bestG.act} in Week ${bestG.week} vs ${bestG.proj.toFixed(1)} projected`);
+  if (worstG) add('Worst player flop', worstG.t, `${worstG.name} (${worstG.pos}) managed ${worstG.act} in Week ${worstG.week} vs ${worstG.proj.toFixed(1)} projected`);
+  return `<div class="awards-grid" style="grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));">${cards.map(c => `
+    <div class="award-card"><div class="award-label">${c.label}</div><div class="award-team">${c.team}</div><div class="award-detail">${c.detail}</div></div>`).join('')}</div>`;
+}
+
+function midPower(conf, G) {
+  const last = midLastWeek(G, conf);
+  const now = midTable(conf, 99, G);
+  const prevWeek = Math.max(1, last - 3);
+  const prev = last > 1 ? midTable(conf, prevWeek, G) : now;
+  const pr = {}; prev.forEach(r => { pr[r.name] = r.rank; });
+  const body = now.map(r => {
+    const d = (pr[r.name] || r.rank) - r.rank;
+    const mv = d > 0 ? `<span class="luck-pos">▲ ${d}</span>` : d < 0 ? `<span class="luck-neg">▼ ${-d}</span>` : '<span class="luck-neutral">—</span>';
+    const l3 = r.g.slice(-3);
+    return `<tr><td class="standings-rank">${r.rank}</td><td class="standings-team">${r.name}</td>
+      <td class="standings-record"><span class="win">${r.wins}</span>-<span class="loss">${r.losses}</span></td>
+      <td>${r.apW}-${r.apL}</td><td>${r.power.toFixed(1)}</td><td>${mv}</td><td>${midMean(l3.map(x => x.pf)).toFixed(1)}</td></tr>`;
+  }).join('');
+  return `<div class="mid-scroll"><table class="standings-table"><thead><tr><th>#</th><th>Team</th><th>Record</th><th>All-Play</th><th>Power</th><th title="Rank change vs. three weeks ago">Move</th><th>Last 3 avg</th></tr></thead><tbody>${body}</tbody></table></div>
+  <p class="allplay-note">Movement compares today's rank to the rankings after Week ${prevWeek}.</p>`;
+}
+
+const midWI = {}; // conf -> {x, y}
+let midG = null;
+function midWIDetail(conf, x, y, G) {
+  const teams = G[conf] || {};
+  const gx = teams[x] || [], gy = teams[y] || [];
+  let w = 0, aw = 0;
+  const rows = gx.map(g => {
+    const o = gy.find(z => z.week === g.week);
+    if (!o) return '';
+    const faced = o.opp === x;          // that team played you that week
+    const oppName = faced ? y : o.opp;
+    const oppScore = faced ? o.pf : o.pa;
+    const win = g.pf > oppScore;
+    if (win) w++; if (g.win) aw++;
+    return `<tr><td>Wk ${g.week}</td><td>${g.pf.toFixed(1)}</td><td class="standings-team">${oppName}${faced ? ' <span class="mid-sub">(played you)</span>' : ''}</td><td>${oppScore.toFixed(1)}</td>
+      <td class="${win ? 'luck-pos' : 'luck-neg'}">${win ? 'W' : 'L'}</td><td class="${g.win ? 'luck-pos' : 'luck-neg'}">${g.win ? 'W' : 'L'}</td></tr>`;
+  }).join('');
+  const n = gx.length, diff = w - aw;
+  const head = y === x ? `<b>${x}</b> on their own schedule: ${aw}-${n - aw}.`
+    : `<b>${x}</b> with the schedule of <b>${y}</b>: <b>${w}-${n - w}</b> instead of ${aw}-${n - aw}${diff ? ` (${diff > 0 ? '+' : ''}${diff} win${Math.abs(diff) === 1 ? '' : 's'})` : ''}.`;
+  return `<p class="mid-wi-head">${head}</p><div class="mid-scroll"><table class="standings-table"><thead><tr><th>Week</th><th>${x}</th><th>Opponent faced</th><th>Their score</th><th>New result</th><th>Actual</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function midWIChange(conf) {
+  const x = document.getElementById('midWIx').value, y = document.getElementById('midWIy').value;
+  midWI[conf] = { x, y };
+  document.getElementById('midWIdetail').innerHTML = midWIDetail(conf, x, y, midG);
+}
+function midWhatIf(conf, G) {
+  midG = G;
+  const names = Object.keys(G[conf] || {}).sort();
+  if (!names.length) return '';
+  const st = midWI[conf] && names.includes(midWI[conf].x) && names.includes(midWI[conf].y) ? midWI[conf] : (midWI[conf] = { x: names[0], y: names[1] || names[0] });
+  const opts = sel => names.map(n => `<option value="${n}"${n === sel ? ' selected' : ''}>${n}</option>`).join('');
+  return `<div class="mid-wi-pick">
+      <label>Take team <select id="midWIx" onchange="midWIChange('${conf}')">${opts(st.x)}</select></label>
+      <label>and give them the schedule of <select id="midWIy" onchange="midWIChange('${conf}')">${opts(st.y)}</select></label>
+    </div>
+    <div id="midWIdetail">${midWIDetail(conf, st.x, st.y, G)}</div>`;
+}
+function midWhatIfSummary(conf, G) {
+  const teams = G[conf] || {}, names = Object.keys(teams);
+  const rows = names.map(x => {
+    const gx = teams[x], res = [];
+    names.forEach(y => {
+      if (y === x) return;
+      let w = 0, n = 0;
+      gx.forEach(g => {
+        const gy = teams[y].find(z => z.week === g.week);
+        if (!gy || gy.opp === x) return;
+        n++; if (g.pf > gy.pa) w++;
+      });
+      if (n) res.push({ y, w: w / n * gx.length });
+    });
+    const actual = gx.filter(g => g.win).length;
+    res.sort((a, b) => b.w - a.w);
+    return { x, actual, G: gx.length, avg: midMean(res.map(r => r.w)), best: res[0], worst: res[res.length - 1],
+      faced: midMean(gx.map(g => g.pa)) };
+  });
+  const confAvg = midMean(rows.map(r => r.faced));
+  rows.sort((a, b) => (b.avg - b.actual) - (a.avg - a.actual));
+  const f1 = v => v.toFixed(1);
+  const body = rows.map(r => {
+    const diff = r.actual - r.avg;
+    const cls = diff > 0.4 ? 'luck-pos' : diff < -0.4 ? 'luck-neg' : 'luck-neutral';
+    const sos = r.faced - confAvg;
+    return `<tr><td class="standings-team">${r.x}</td><td>${r.actual}-${r.G - r.actual}</td>
+      <td>${f1(r.avg)}-${f1(r.G - r.avg)}</td><td class="${cls}">${diff > 0 ? '+' : ''}${diff.toFixed(1)}</td>
+      <td title="${r.best.y}'s schedule">${f1(r.best.w)} <span class="mid-sub">(${r.best.y})</span></td>
+      <td title="${r.worst.y}'s schedule">${f1(r.worst.w)} <span class="mid-sub">(${r.worst.y})</span></td>
+      <td class="${sos > 0 ? 'luck-neg' : 'luck-pos'}">${sos > 0 ? '+' : ''}${f1(sos)}</td></tr>`;
+  }).join('');
+  return `<div class="mid-scroll"><table class="standings-table"><thead><tr><th>Team</th><th>Actual</th><th>Avg schedule</th><th>Diff</th><th>Easiest schedule</th><th>Toughest schedule</th><th title="Average points allowed per week vs. the conference average">Opp. pts faced</th></tr></thead><tbody>${body}</tbody></table></div>
+  <p class="allplay-note">Each team's real weekly scores replayed against every other team's schedule. "Avg schedule" is the record you'd expect against a typical draw; Diff is actual wins minus that. Opp. pts faced is how many more (+) or fewer (−) points than the conference average this team's opponents scored against them.</p>`;
+}
+
+function midOddsTable(conf, G) {
+  const o = midOdds(conf, G);
+  if (!o) return '<p style="color:var(--muted);">Not enough games yet.</p>';
+  const rows = midTable(conf, 99, G).map(r => ({ r, o: o.res[r.name] })).sort((a, b) => b.o.playoff - a.o.playoff || b.o.wins - a.o.wins);
+  const p = v => v >= 0.995 ? '>99%' : v < 0.005 ? '<1%' : Math.round(v * 100) + '%';
+  const body = rows.map(({ r, o: x }) => `<tr><td class="standings-team">${r.name}</td>
+    <td class="standings-record"><span class="win">${r.wins}</span>-<span class="loss">${r.losses}</span></td>
+    <td>${x.wins.toFixed(1)}</td>
+    <td><div class="odds-bar"><div style="width:${(x.playoff * 100).toFixed(0)}%"></div></div> <b>${p(x.playoff)}</b></td>
+    <td>${p(x.bye)}</td><td>${p(x.top1)}</td></tr>`).join('');
+  return `<div class="mid-scroll"><table class="standings-table"><thead><tr><th>Team</th><th>Record</th><th>Proj. wins</th><th>Make playoffs</th><th>Top 2</th><th>#1 seed</th></tr></thead><tbody>${body}</tbody></table></div>
+  <p class="allplay-note">${SIM_RUNS.toLocaleString()} simulated seasons. ${o.remaining} regular-season week${o.remaining === 1 ? '' : 's'} left (through Week ${REG_SEASON_WEEKS}); top ${PLAYOFF_TEAMS} per conference advance, ties broken by points scored. Each future week randomly pairs teams in the conference, and scores are drawn around each team's average (pulled slightly toward the conference average). It's a rough guide, not the real schedule.</p>`;
+}
+
+function midRecaps(conf, G) {
+  const rows = midTable(conf, 99, G);
+  if (!rows.length) return '';
+  const o = midOdds(conf, G);
+  const P = midPlayers(conf);
+  const pfRank = [...rows].sort((a, b) => b.pf - a.pf).map(r => r.name);
+  const cards = rows.map(r => {
+    const g = r.g, pl = P[r.name] || { tot: {}, games: [] };
+    const best = [...g].sort((a, b) => b.pf - a.pf)[0], worst = [...g].sort((a, b) => a.pf - b.pf)[0];
+    const mvpName = Object.keys(pl.tot).sort((a, b) => pl.tot[b] - pl.tot[a])[0];
+    const star = [...pl.games].sort((a, b) => b.act - a.act)[0];
+    const bust = [...pl.games].filter(x => x.proj >= 8).sort((a, b) => a.diff - b.diff)[0];
+    const graded = g.filter(x => x.correct !== null);
+    const hit = graded.filter(x => x.correct).length;
+    const exp = r.apPct * g.length, luck = r.wins - exp;
+    const od = o && o.res[r.name];
+    const p0 = od ? od.playoff : 0;
+    const tier = p0 >= 0.9 && r.rank <= 3 ? ['Contender', 'tier-good'] : p0 >= 0.6 ? ['Playoff team', 'tier-good'] :
+      p0 >= 0.25 ? ['On the bubble', 'tier-mid'] : p0 >= 0.05 ? ['Long shot', 'tier-bad'] : ['Basement', 'tier-bad'];
+    const early = g.slice(0, Math.ceil(g.length / 2)), late = g.slice(-Math.ceil(g.length / 2));
+    const trend = midMean(late.map(x => x.pf)) - midMean(early.map(x => x.pf));
+    const bits = [];
+    if (r.wins === 0) bits.push('Still looking for the first win.');
+    else if (r.losses === 0) bits.push('Unbeaten.');
+    if (luck > 0.8) bits.push(`Record is flattering: about ${luck.toFixed(1)} wins above what their scores earn.`);
+    else if (luck < -0.8) bits.push(`Unlucky: about ${(-luck).toFixed(1)} wins below what their scores earn.`);
+    else if (r.apPct < 0.4) bits.push('The scoring backs up the record.');
+    else if (r.apPct > 0.6) bits.push('The scoring backs up the record.');
+    if (g.length >= 4 && trend > 15) bits.push('Scoring is trending up.');
+    else if (g.length >= 4 && trend < -15) bits.push('Scoring has dropped off lately.');
+    const line = bits.join(' ') || 'Middle of the pack.';
+    const stat = (k, v) => `<div class="mid-stat"><span>${k}</span><b>${v}</b></div>`;
+    return `<div class="recap-card">
+      <div class="recap-head">${teamBadge(r.name, 'sm')}<div><div class="recap-name">${r.name}</div>
+        <div class="recap-sub">#${r.rank} power · ${r.wins}-${r.losses} · all-play ${r.apW}-${r.apL}</div></div><span class="tier ${tier[1]}">${tier[0]}</span></div>
+      <p class="recap-line">${line}</p>
+      ${stat('Points for', `${r.pf.toFixed(1)} (#${pfRank.indexOf(r.name) + 1}) · avg ${(r.pf / g.length).toFixed(1)}`)}
+      ${stat('Best week', best ? `${best.pf.toFixed(1)} (Wk ${best.week})` : '—')}
+      ${stat('Worst week', worst ? `${worst.pf.toFixed(1)} (Wk ${worst.week})` : '—')}
+      ${stat('Top scorer', mvpName ? `${mvpName} · ${pl.tot[mvpName].toFixed(1)}` : '—')}
+      ${stat('Best game', star ? `${star.name} ${star.act} (Wk ${star.week})` : '—')}
+      ${stat('Biggest flop', bust ? `${bust.name} ${bust.act} vs ${bust.proj.toFixed(1)} proj (Wk ${bust.week})` : '—')}
+      ${stat('Our picks on them', graded.length ? `${hit}-${graded.length - hit}` : '—')}
+      ${stat('Playoff odds', od ? (od.playoff >= 0.995 ? '>99%' : od.playoff < 0.005 ? '<1%' : Math.round(od.playoff * 100) + '%') : '—')}
+    </div>`;
+  }).join('');
+  return `<div class="recap-grid">${cards}</div>`;
+}
+
+function renderMidseason() {
+  const el = document.getElementById('midseason');
+  const G = midGames();
+  if (!G[currentConf]) { el.innerHTML = '<p style="color:var(--muted);">No completed games yet.</p>'; return; }
+  const wk = midLastWeek(G, currentConf);
+  el.innerHTML = `
+    <div class="hub-section-title">Midseason Awards — ${currentConf} · through Week ${wk}</div>
+    ${midAwards(currentConf, G)}
+    <div class="hub-section-title">Power Rankings — ${currentConf}</div>
+    ${midPower(currentConf, G)}
+    <div class="hub-section-title">Playoff Odds — ${currentConf}</div>
+    ${midOddsTable(currentConf, G)}
+    <div class="hub-section-title">What If You Had Their Schedule? — ${currentConf}</div>
+    ${midWhatIf(currentConf, G)}
+    <div class="hub-section-title">Team Report Cards — ${currentConf}</div>
+    ${midRecaps(currentConf, G)}`;
 }
 
 renderAll();
