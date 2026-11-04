@@ -2076,13 +2076,17 @@ function hashText(s) {
 
 async function fetchCsvText(url) {
   const sep = url.includes("?") ? "&" : "?";
-  const res = await fetch(url + sep + "_=" + Date.now(), { cache: "no-store" });
+  const ctl = new AbortController();
+  const tmo = setTimeout(() => ctl.abort(), 25000);
+  let res;
+  try { res = await fetch(url + sep + "_=" + Date.now(), { cache: "no-store", signal: ctl.signal }); }
+  finally { clearTimeout(tmo); }
   if (!res.ok) throw new Error("HTTP " + res.status);
   return res.text();
 }
 
 function dropVeil() { const v = document.getElementById('loading-veil'); if (v) v.remove(); }
-setTimeout(dropVeil, 8000);
+setTimeout(dropVeil, 30000);
 async function refreshLive() {
   try { await refreshLiveInner(); } finally { dropVeil(); }
 }
