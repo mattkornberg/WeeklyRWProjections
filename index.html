@@ -1025,6 +1025,7 @@ function luckLabel(luck) {
 function renderStandings(conf) {
   const rows = powerRankedTeams(conf);
   if (!rows.length) return '<p style="color:var(--muted);">No completed games yet.</p>';
+  const LAPs = leagueAllPlay();
   const body = rows.map((r, i) => `
     <tr>
       <td class="standings-rank">${i + 1}</td>
@@ -1034,6 +1035,7 @@ function renderStandings(conf) {
       <td>${r.pa.toFixed(1)}</td>
       <td>${r.avg.toFixed(1)}</td>
       <td>${r.allPlayWins}-${r.allPlayLosses}</td>
+      <td>${(LAPs[conf + '|' + r.name] || { w: 0, l: 0 }).w}-${(LAPs[conf + '|' + r.name] || { w: 0, l: 0 }).l}</td>
       <td title="Actual wins minus expected wins (all-play win% × games played)">${luckLabel(r.luck)}</td>
       <td class="power-score">${r.powerScore.toFixed(1)}</td>
       <td class="sparkline-cell">${sparklineSvg(r.weekly)}</td>
@@ -1041,7 +1043,7 @@ function renderStandings(conf) {
   return `
     <table class="standings-table">
       <thead><tr>
-        <th>#</th><th>Team</th><th>Record</th><th>PF</th><th>PA</th><th>Avg</th><th>All-Play</th><th>Luck</th><th>Power</th><th>Trend</th>
+        <th>#</th><th>Team</th><th>Record</th><th>PF</th><th>PA</th><th>Avg</th><th>All-Play (12)</th><th title="vs. all 24 teams in the MFL league each week">All-Play (24)</th><th>Luck</th><th>Power</th><th>Trend</th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table>`;
@@ -1929,6 +1931,20 @@ const DIVISIONS = {
 const LEAGUE_GROUP = { TT: 'A', DD: 'A', RR: 'B', PP: 'B' };   // MFL leagues: TT+DD and RR+PP
 const PLAYOFF_SIMS = 8000;
 
+// League-wide all-play: each week, a team vs. every other team in its MFL league (TT+DD = 24, RR+PP = 24)
+function leagueAllPlay() {
+  const byKey = {}, out = {};
+  statGames().forEach(g => {
+    const k = g.week + '|' + LEAGUE_GROUP[g.conf];
+    (byKey[k] = byKey[k] || []).push({ conf: g.conf, team: g.a, s: g.sa }, { conf: g.conf, team: g.b, s: g.sb });
+  });
+  Object.values(byKey).forEach(arr => arr.forEach(x => {
+    const o = out[x.conf + '|' + x.team] = out[x.conf + '|' + x.team] || { w: 0, l: 0 };
+    arr.forEach(y => { if (y === x) return; if (x.s > y.s) o.w++; else o.l++; });
+  }));
+  return out;
+}
+
 function divisionOf(conf, team) {
   const d = DIVISIONS[conf] || {};
   for (const k of Object.keys(d)) if (d[k].includes(team)) return k;
@@ -1973,7 +1989,12 @@ function playoffSim(conf, G) {
     src.forEach(([a, b]) => { if (pos[a] !== undefined && pos[b] !== undefined && !seen.has(a) && !seen.has(b)) { seen.add(a); seen.add(b); pairs.push([pos[a], pos[b]]); } });
     if (pairs.length * 2 >= n - 1) { sched.push(pairs); realWeeks++; } else sched.push(null);
   }
-  const base = { w: rows.map(r => r.wins), pf: rows.map(r => r.pf), ap: rows.map(r => r.apW) };
+  const LAP = leagueAllPlay();
+  const partnerConf = Object.keys(LEAGUE_GROUP).find(c => c !== conf && LEAGUE_GROUP[c] === LEAGUE_GROUP[conf]);
+  const prow = partnerConf && G[partnerConf] ? midTable(partnerConf, 99, G) : [];
+  const pMean = midMean(prow.flatMap(r => r.g.map(x => x.pf)));
+  const pmu = prow.map(r => (r.g.length * midMean(r.g.map(x => x.pf)) + 4 * pMean) / (r.g.length + 4));
+  const base = { w: rows.map(r => r.wins), pf: rows.map(r => r.pf), ap: rows.map(r => (LAP[conf + '|' + r.name] || { w: 0 }).w) };
   const tally = rows.map(() => ({ make: 0, div: 0, wild: 0, apSpot: 0, bye: 0, seed1: 0 }));
   for (let k = 0; k < PLAYOFF_SIMS; k++) {
     const w = base.w.slice(), pf = base.pf.slice(), ap = base.ap.slice();
@@ -1985,8 +2006,9 @@ function playoffSim(conf, G) {
         pairs = []; for (let i = 0; i + 1 < n; i += 2) pairs.push([idx[i], idx[i + 1]]);
       }
       const s = mu.map(m => m + pooled * midRandn());
+      const sp = pmu.map(m => m + pooled * midRandn());
       for (const [a, b] of pairs) { pf[a] += s[a]; pf[b] += s[b]; if (s[a] > s[b]) w[a]++; else w[b]++; }
-      for (let i = 0; i < n; i++) { let c = 0; for (let j = 0; j < n; j++) if (j !== i && s[i] > s[j]) c++; ap[i] += c; }
+      for (let i = 0; i < n; i++) { let c = 0; for (let j = 0; j < n; j++) if (j !== i && s[i] > s[j]) c++; for (let j = 0; j < sp.length; j++) if (s[i] > sp[j]) c++; ap[i] += c; }
     }
     const q = pickQualifiers(w, pf, ap, divs);
     q.chosen.forEach((route, i) => {
@@ -2004,7 +2026,7 @@ function playoffSim(conf, G) {
   // "if the season ended today"
   const now = pickQualifiers(base.w, base.pf, base.ap, divs);
   const today = {}; now.chosen.forEach((route, i) => { today[rows[i].name] = { route, seed: now.seeds.indexOf(i) + 1 }; });
-  return { rows, divs, res, today, remaining, played, realWeeks };
+  return { rows, divs, res, today, remaining, played, realWeeks, LAP };
 }
 
 function renderPlayoffPicture(conf) {
@@ -2027,15 +2049,15 @@ function renderPlayoffPicture(conf) {
       <td style="color:var(--muted);font-size:12px;white-space:nowrap">${e.div.replace('Chapter ', 'Ch ')}</td>
       <td class="standings-record"><span class="win">${e.r.wins}</span>-<span class="loss">${e.r.losses}</span></td>
       <td>${e.r.pf.toFixed(1)}</td>
-      <td>${e.r.apW}-${e.r.apL}</td>
+      <td>${(o.LAP[conf + '|' + e.r.name] || { w: 0, l: 0 }).w}-${(o.LAP[conf + '|' + e.r.name] || { w: 0, l: 0 }).l}</td>
       <td><div class="odds-bar"><div style="width:${(e.x.make * 100).toFixed(0)}%"></div></div> <b>${p(e.x.make)}</b> ${status(e)}</td>
       <td>${p(e.x.div)}</td><td>${p(e.x.bye)}</td><td>${p(e.x.seed1)}</td></tr>`;
   }).join('');
   return `<div class="mid-scroll"><table class="standings-table"><thead><tr>
-      <th title="Seed and route if the regular season ended today">Seed now</th><th>Team</th><th>Division</th><th>Record</th><th>PF</th><th>All-Play</th><th>Make playoffs</th><th>Div. title</th><th>Bye</th><th>#1 seed</th>
+      <th title="Seed and route if the regular season ended today">Seed now</th><th>Team</th><th>Division</th><th>Record</th><th>PF</th><th title="Record vs. all 24 teams in the MFL league each week — the number used for the all-play spot">All-Play (24)</th><th>Make playoffs</th><th>Div. title</th><th>Bye</th><th>#1 seed</th>
     </tr></thead><tbody>${body}</tbody></table></div>
     <p class="allplay-note">${PLAYOFF_SIMS.toLocaleString()} simulated finishes. ${o.remaining} regular-season week${o.remaining === 1 ? '' : 's'} left (through Week ${REG_SEASON_WEEKS}). ${o.realWeeks >= o.remaining ? 'Uses the real remaining schedule.' : 'Uses the real schedule where the sheet has it, random pairings otherwise.'}
-    Six per conference qualify: 3 division winners, then the next 2 best by wins (ties by points), then the best all-play record among the rest. Seeds go by wins, then points. “In”/“Out” means virtually certain in the simulations (over 99.95% / under 0.05%). Future scores are drawn from each team's scoring average (blended with the conference's) and typical week-to-week swing.</p>`;
+    Six per conference qualify: 3 division winners, then the next 2 best by wins (ties by points), then the best league-wide all-play record (vs. all 24 teams in the MFL league each week) among the rest. Seeds go by wins, then points. “In”/“Out” means virtually certain in the simulations (over 99.95% / under 0.05%). Future scores are drawn from each team's scoring average (blended with the conference's) and typical week-to-week swing.</p>`;
 }
 
 function renderPlayoffRules() {
@@ -2149,18 +2171,24 @@ function weeklyFinishTable(games) {
 
 function luckTable(log) {
   const rows = [];
-  const weekAP = {}; // conf|week -> list of scores
-  Object.values(log).forEach(l => l.forEach(x => { (weekAP[x.conf + '|' + x.week] = weekAP[x.conf + '|' + x.week] || []).push(x.pf); }));
+  const weekAP = {}, weekLG = {};
+  Object.values(log).forEach(l => l.forEach(x => {
+    (weekAP[x.conf + '|' + x.week] = weekAP[x.conf + '|' + x.week] || []).push(x.pf);
+    (weekLG[LEAGUE_GROUP[x.conf] + '|' + x.week] = weekLG[LEAGUE_GROUP[x.conf] + '|' + x.week] || []).push(x.pf);
+  }));
   Object.values(log).forEach(l => {
-    let apW = 0, apG = 0;
-    l.forEach(x => { weekAP[x.conf + '|' + x.week].forEach(s => { if (s === x.pf) return; apG++; if (x.pf > s) apW++; }); });
+    let aW = 0, aG = 0, lW = 0, lG = 0;
+    l.forEach(x => {
+      weekAP[x.conf + '|' + x.week].forEach(s => { if (s === x.pf) return; aG++; if (x.pf > s) aW++; });
+      weekLG[LEAGUE_GROUP[x.conf] + '|' + x.week].forEach(s => { if (s === x.pf) return; lG++; if (x.pf > s) lW++; });
+    });
     const w = l.filter(x => x.win).length, g = l.length;
-    const exp = apG ? (apW / apG) * g : 0;
-    rows.push({ t: l[0].team, conf: l[0].conf, w, g, apW, apG, exp, luck: w - exp });
+    const e12 = aG ? (aW / aG) * g : 0, e24 = lG ? (lW / lG) * g : 0;
+    rows.push({ t: l[0].team, conf: l[0].conf, w, g, aW, aG, lW, lG, e12, e24, l12: w - e12, l24: w - e24 });
   });
-  rows.sort((a, b) => b.luck - a.luck);
-  return statTable(['', 'Team', 'Record', 'All-play', 'Expected wins', 'Luck'].slice(1),
-    rows.map(r => [tn(r.t, r.conf), `${r.w}-${r.g - r.w}`, `${r.apW}-${r.apG - r.apW}`, f1(r.exp), luckLabel(r.luck)]));
+  rows.sort((a, b) => b.l12 - a.l12);
+  return statTable(['Team', 'Record', 'All-play (12)', 'Luck (12)', 'All-play (24)', 'Luck (24)'],
+    rows.map(r => [tn(r.t, r.conf), `${r.w}-${r.g - r.w}`, `${r.aW}-${r.aG - r.aW}`, luckLabel(r.l12), `${r.lW}-${r.lG - r.lW}`, luckLabel(r.l24)]));
 }
 
 function projBeaters(log) {
@@ -2225,7 +2253,7 @@ function renderLeagueStats() {
     <p class="allplay-note" style="margin-top:0">Ranks every team against its whole MFL league each week (TT+DD together, RR+PP together). Same stat for every team.</p>
     <div style="max-height:560px;overflow:auto;">${weeklyFinishTable(games)}</div>
     <div class="hub-section-title">Luck Index — every team</div>
-    <p class="allplay-note" style="margin-top:0">Expected wins = all-play win% (vs. the other 11 teams in the conference each week) × games played. Luck = actual wins minus expected wins.</p>
+    <p class="allplay-note" style="margin-top:0">Luck = actual wins minus expected wins (all-play win% × games played). “12” compares each team with the other 11 in its conference each week; “24” compares it with all 24 teams in its MFL league (TT+DD, RR+PP). Sorted by the 12-team luck.</p>
     <div style="max-height:560px;overflow:auto;">${luckTable(log)}</div>
     <div class="hub-section-title">Projection Beaters — who outscores the projection</div>
     <p class="allplay-note" style="margin-top:0">Compares each team's actual weekly total with the projected total for the lineup it started. Positive means the lineup out-produced its projection.</p>
