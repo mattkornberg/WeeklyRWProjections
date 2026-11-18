@@ -762,6 +762,8 @@
 
 <div class="season-hub" id="seasonHub" style="display:none;"></div>
 <div class="season-hub" id="midseason" style="display:none;"></div>
+<div class="season-hub" id="playoffTab" style="display:none;"></div>
+<div class="season-hub" id="leagueStats" style="display:none;"></div>
 
 <footer>
   Scoring uses the verified Roster Wars formulas (PPR + rushing for RB/WR, 1.5/rec TE premium, position-weighted IDP, distance-scaled kicker). Point values are converted from live Week 1 stat projections, not the preseason <code>pts_proj</code> baseline. The amber dot marks the closest projected matchup in each conference. Use the arrows to step through positions — the tally below tracks the running score through however far you've gone. Actual results reflect final locked rosters, which occasionally differ from the lineups used for the prediction if a manager made a late swap.
@@ -906,7 +908,7 @@ function confMatchups(conf) {
 function renderModeToggle() {
   const el = document.getElementById('modeToggle');
   el.innerHTML = '';
-  [['matchups', 'Matchups'], ['season', 'Season Hub'], ['midseason', 'Midseason']].forEach(([mode, label]) => {
+  [['matchups', 'Matchups'], ['season', 'Season Hub'], ['midseason', 'Midseason'], ['playoffs', 'Playoffs'], ['stats', 'League Stats']].forEach(([mode, label]) => {
     const btn = document.createElement('button');
     btn.className = 'mode-btn' + (mode === currentMode ? ' active' : '');
     btn.textContent = label;
@@ -1362,6 +1364,7 @@ function renderMain() {
   </div>`;
 
   html += actualLine;
+  html += preGameStrip(m);
 
   if (m.pending && m.liveInfo) {
     const L = m.liveInfo, pa = Math.round(L.winProbA * 100), pb = 100 - pa;
@@ -1504,8 +1507,19 @@ function renderAll() {
   const seasonHubEl = document.getElementById('seasonHub');
   const midEl = document.getElementById('midseason');
   midEl.style.display = 'none';
+  const poEl = document.getElementById('playoffTab'), lsEl = document.getElementById('leagueStats');
+  poEl.style.display = 'none'; lsEl.style.display = 'none';
 
-  if (currentMode === 'midseason') {
+  if (currentMode === 'playoffs' || currentMode === 'stats') {
+    weekRowEl.style.display = 'none';
+    recordBannerEl.style.display = 'none';
+    matchupRowEl.style.display = 'none';
+    mainEl.style.display = 'none';
+    leagueSectionEl.style.display = 'none';
+    seasonHubEl.style.display = 'none';
+    if (currentMode === 'playoffs') { poEl.style.display = ''; renderPlayoffTab(); }
+    else { lsEl.style.display = ''; renderLeagueStats(); }
+  } else if (currentMode === 'midseason') {
     weekRowEl.style.display = 'none';
     recordBannerEl.style.display = 'none';
     matchupRowEl.style.display = 'none';
@@ -1883,11 +1897,350 @@ function renderMidseason() {
     <div class="hub-section-title">Power Rankings — ${currentConf}</div>
     ${midPower(currentConf, G)}
     <div class="hub-section-title">Playoff Odds — ${currentConf}</div>
-    ${midOddsTable(currentConf, G)}
+    ${renderPlayoffPicture(currentConf)}
     <div class="hub-section-title">What If You Had Their Schedule? — ${currentConf}</div>
     ${midWhatIf(currentConf, G)}
     <div class="hub-section-title">Team Report Cards — ${currentConf}</div>
     ${midRecaps(currentConf, G)}`;
+}
+
+// ===================================================================
+// PLAYOFF PICTURE + LEAGUE STATS
+// Rules (league constitution R.2): 6 of 12 per conference qualify —
+// 3 division winners, the next 2 best by wins then points, and the
+// best all-play record among the rest. Seeds follow regular-season
+// standings (wins, then points). Regular season = Weeks 1-12.
+// Everything is computed in the browser from DATA, same for every team.
+// ===================================================================
+const DIVISIONS = {
+  DD: { 'Chapter 1': ['Minnesota Eternals','Titletown Tyrants','ToonTown Warlocks','England Dragons'],
+        'Chapter 2': ['Whiskey Creek Gadabouts','Nevada Nighthawks','Littleton SilverBallers','Atlanta Africans'],
+        'Chapter 3': ['Muskego Muskies','Las Vegas Degenerates','Indiana Mayhem','California Nightmare'] },
+  TT: { 'Chapter 4': ['Alaska Arsenic','Philadelphia Pigskins','Tenafly Vipers','Maplewood Doppelgangers'],
+        'Chapter 5': ['Tarpon Springs Redknights','Colorado Crusaders','Hamilton Steel Cats','Hatteras Bay Mad Goats'],
+        'Chapter 6': ['San Francisco Golddiggers','Rocky Mountain Oysters','Charm City Justice','Kane County Goon Squad'] },
+  PP: { 'Chapter 7': ['Indiana Mayhem','Crystal Lake Counselors','Stellenbosch Saints','Naperville Divine'],
+        'Chapter 8': ['Dallas Spurs','Riverbank Raiders','Vegas Beach Tiger Sharks','Titletown Tyrants'],
+        'Chapter 9': ['Tenafly Vipers','Coachella Tremors','Cyclone City Falcons','East Tennessee Badgers'] },
+  RR: { 'Chapter 10': ['Latvia Unicorns','Philadelphia Pigskins','Boston Brahmins','Thief River Unforgiven'],
+        'Chapter 11': ['UpsideDown Demogorgans','Motor City Malachi Crunch','Riverside Rottweilers','Windy City Blitz'],
+        'Chapter 12': ['Michigan Mungmen','London Legion','Gainesville Gators','Pacific Puffins'] }
+};
+const LEAGUE_GROUP = { TT: 'A', DD: 'A', RR: 'B', PP: 'B' };   // MFL leagues: TT+DD and RR+PP
+const PLAYOFF_SIMS = 8000;
+
+function divisionOf(conf, team) {
+  const d = DIVISIONS[conf] || {};
+  for (const k of Object.keys(d)) if (d[k].includes(team)) return k;
+  return null;
+}
+
+// Pick the six qualifiers by the constitution. w/pf/ap are parallel arrays; divs[i] is team i's division.
+function pickQualifiers(w, pf, ap, divs) {
+  const n = w.length;
+  const cmp = (a, b) => w[b] - w[a] || pf[b] - pf[a];
+  const chosen = new Map(); // idx -> route
+  const byDiv = {};
+  for (let i = 0; i < n; i++) (byDiv[divs[i]] = byDiv[divs[i]] || []).push(i);
+  Object.values(byDiv).forEach(g => { g.sort(cmp); chosen.set(g[0], 'Division'); });
+  const rest = [...Array(n).keys()].filter(i => !chosen.has(i)).sort(cmp);
+  rest.slice(0, 2).forEach(i => chosen.set(i, 'Wild card'));
+  const rest2 = rest.slice(2).sort((a, b) => ap[b] - ap[a] || w[b] - w[a] || pf[b] - pf[a]);
+  if (rest2.length) chosen.set(rest2[0], 'All-play');
+  const seeds = [...chosen.keys()].sort(cmp);
+  return { chosen, seeds };
+}
+
+function playoffSim(conf, G) {
+  const rows = midTable(conf, 99, G);
+  if (!rows.length) return null;
+  const divs = rows.map(r => divisionOf(conf, r.name));
+  if (divs.some(d => !d)) return null;
+  const n = rows.length;
+  const played = Math.max(...rows.map(r => r.g.length));
+  const remaining = Math.max(0, REG_SEASON_WEEKS - played);
+  const all = rows.flatMap(r => r.g.map(x => x.pf));
+  const cMean = midMean(all);
+  const pooled = Math.max(25, Math.sqrt(midMean(rows.filter(r => r.g.length > 1).map(r => { const s = midSd(r.g.map(x => x.pf)); return s * s; }))) || 35);
+  const mu = rows.map(r => (r.g.length * midMean(r.g.map(x => x.pf)) + 4 * cMean) / (r.g.length + 4));
+  const pos = {}; rows.forEach((r, i) => { pos[r.name] = i; });
+  // real remaining schedule where the sheet has it
+  const sched = []; let realWeeks = 0;
+  for (let wk = played + 1; wk <= REG_SEASON_WEEKS; wk++) {
+    const src = DATA.filter(m => m.week === wk && m.conf === conf && m.pending).map(m => [stripConf(m.teamA), stripConf(m.teamB)])
+      .concat(FUTURE.filter(r => Number(r.week) === wk && r.conf === conf).map(r => [stripConf(r.teamA), stripConf(r.teamB)]));
+    const pairs = [], seen = new Set();
+    src.forEach(([a, b]) => { if (pos[a] !== undefined && pos[b] !== undefined && !seen.has(a) && !seen.has(b)) { seen.add(a); seen.add(b); pairs.push([pos[a], pos[b]]); } });
+    if (pairs.length * 2 >= n - 1) { sched.push(pairs); realWeeks++; } else sched.push(null);
+  }
+  const base = { w: rows.map(r => r.wins), pf: rows.map(r => r.pf), ap: rows.map(r => r.apW) };
+  const tally = rows.map(() => ({ make: 0, div: 0, wild: 0, apSpot: 0, bye: 0, seed1: 0 }));
+  for (let k = 0; k < PLAYOFF_SIMS; k++) {
+    const w = base.w.slice(), pf = base.pf.slice(), ap = base.ap.slice();
+    for (let wk = 0; wk < remaining; wk++) {
+      let pairs = sched[wk];
+      if (!pairs) {
+        const idx = [...Array(n).keys()];
+        for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+        pairs = []; for (let i = 0; i + 1 < n; i += 2) pairs.push([idx[i], idx[i + 1]]);
+      }
+      const s = mu.map(m => m + pooled * midRandn());
+      for (const [a, b] of pairs) { pf[a] += s[a]; pf[b] += s[b]; if (s[a] > s[b]) w[a]++; else w[b]++; }
+      for (let i = 0; i < n; i++) { let c = 0; for (let j = 0; j < n; j++) if (j !== i && s[i] > s[j]) c++; ap[i] += c; }
+    }
+    const q = pickQualifiers(w, pf, ap, divs);
+    q.chosen.forEach((route, i) => {
+      tally[i].make++;
+      if (route === 'Division') tally[i].div++; else if (route === 'Wild card') tally[i].wild++; else tally[i].apSpot++;
+    });
+    q.seeds.forEach((i, si) => { if (si < 2) tally[i].bye++; if (si === 0) tally[i].seed1++; });
+  }
+  const res = {};
+  rows.forEach((r, i) => {
+    const t = tally[i];
+    res[r.name] = { make: t.make / PLAYOFF_SIMS, div: t.div / PLAYOFF_SIMS, wild: t.wild / PLAYOFF_SIMS,
+      apSpot: t.apSpot / PLAYOFF_SIMS, bye: t.bye / PLAYOFF_SIMS, seed1: t.seed1 / PLAYOFF_SIMS };
+  });
+  // "if the season ended today"
+  const now = pickQualifiers(base.w, base.pf, base.ap, divs);
+  const today = {}; now.chosen.forEach((route, i) => { today[rows[i].name] = { route, seed: now.seeds.indexOf(i) + 1 }; });
+  return { rows, divs, res, today, remaining, played, realWeeks };
+}
+
+function renderPlayoffPicture(conf) {
+  const G = midGames();
+  if (!G[conf]) return '<p style="color:var(--muted);">No completed games yet.</p>';
+  const o = playoffSim(conf, G);
+  if (!o) return '<p style="color:var(--muted);">Division data missing for this conference.</p>';
+  const p = v => v >= 0.9995 ? '>99.9%' : v < 0.0005 ? '<0.1%' : v >= 0.995 ? '>99%' : v < 0.005 ? '<1%' : Math.round(v * 100) + '%';
+  const list = o.rows.map((r, i) => ({ r, div: o.divs[i], x: o.res[r.name], t: o.today[r.name] }));
+  list.sort((a, b) => (a.t ? a.t.seed : 99) - (b.t ? b.t.seed : 99) || b.x.make - a.x.make || b.r.wins - a.r.wins || b.r.pf - a.r.pf);
+  const status = e => e.x.make >= 0.9995 ? '<span class="luck-pos">In</span>' : e.x.make < 0.0005 ? '<span class="luck-neg">Out</span>' : '';
+  let outRank = 0;
+  const body = list.map(e => {
+    const seed = e.t ? '#' + e.t.seed : '–';
+    const route = e.t ? e.t.route : '';
+    if (!e.t) outRank++;
+    return `<tr${e.t ? '' : ' style="opacity:.85"'}>
+      <td class="standings-rank" style="white-space:nowrap">${seed} <span style="color:var(--muted);font-size:11px">${route}</span></td>
+      <td class="standings-team">${e.r.name}</td>
+      <td style="color:var(--muted);font-size:12px;white-space:nowrap">${e.div.replace('Chapter ', 'Ch ')}</td>
+      <td class="standings-record"><span class="win">${e.r.wins}</span>-<span class="loss">${e.r.losses}</span></td>
+      <td>${e.r.pf.toFixed(1)}</td>
+      <td>${e.r.apW}-${e.r.apL}</td>
+      <td><div class="odds-bar"><div style="width:${(e.x.make * 100).toFixed(0)}%"></div></div> <b>${p(e.x.make)}</b> ${status(e)}</td>
+      <td>${p(e.x.div)}</td><td>${p(e.x.bye)}</td><td>${p(e.x.seed1)}</td></tr>`;
+  }).join('');
+  return `<div class="mid-scroll"><table class="standings-table"><thead><tr>
+      <th title="Seed and route if the regular season ended today">Seed now</th><th>Team</th><th>Division</th><th>Record</th><th>PF</th><th>All-Play</th><th>Make playoffs</th><th>Div. title</th><th>Bye</th><th>#1 seed</th>
+    </tr></thead><tbody>${body}</tbody></table></div>
+    <p class="allplay-note">${PLAYOFF_SIMS.toLocaleString()} simulated finishes. ${o.remaining} regular-season week${o.remaining === 1 ? '' : 's'} left (through Week ${REG_SEASON_WEEKS}). ${o.realWeeks >= o.remaining ? 'Uses the real remaining schedule.' : 'Uses the real schedule where the sheet has it, random pairings otherwise.'}
+    Six per conference qualify: 3 division winners, then the next 2 best by wins (ties by points), then the best all-play record among the rest. Seeds go by wins, then points. “In”/“Out” means virtually certain in the simulations (over 99.95% / under 0.05%). Future scores are drawn from each team's scoring average (blended with the conference's) and typical week-to-week swing.</p>`;
+}
+
+function renderPlayoffRules() {
+  return `<div class="award-card" style="margin-top:18px;text-align:left;">
+    <div class="award-label">Playoff Format</div>
+    <div class="award-detail" style="text-align:left;line-height:1.55">
+      <b>Wk 13 · Round 1:</b> #3 seed calls out a opponent from #4/#5/#6; the other two play; #1 and #2 get byes.<br>
+      <b>Wk 14 · Round 2:</b> #1 seed calls out an opponent from #2 and the two Round 1 winners; remaining two play.<br>
+      <b>Wk 15 · Round 3:</b> Conference Championship; the losers meet in the other game.<br>
+      <b>Wk 16 · Final:</b> Roster Wars Championship (conference champs) and Third Place Game. Playoff ties go to the better seed.<br>
+      The 6 teams that miss the cut play an identical Consolation Bracket.
+    </div></div>`;
+}
+
+// ---------- league-wide stats ----------
+function statGames() {
+  const out = [];
+  DATA.forEach(m => {
+    if (m.pending || typeof m.actualTotalA !== 'number' || typeof m.actualTotalB !== 'number' || m.missingSide) return;
+    out.push({ week: m.week, conf: m.conf, a: stripConf(m.teamA), b: stripConf(m.teamB),
+      sa: m.actualTotalA, sb: m.actualTotalB, pa: m.totalA, pb: m.totalB });
+  });
+  return out;
+}
+function statTeamLog(games) {
+  const log = {}; // conf|team -> [{week, pf, pa, proj, win}]
+  games.forEach(g => {
+    [[g.a, g.sa, g.sb, g.pa, g.pb], [g.b, g.sb, g.sa, g.pb, g.pa]].forEach(([t, pf, pa, proj, oproj]) => {
+      const k = g.conf + '|' + t;
+      (log[k] = log[k] || []).push({ conf: g.conf, team: t, week: g.week, pf, pa, proj, oproj, win: pf > pa });
+    });
+  });
+  Object.values(log).forEach(l => l.sort((x, y) => x.week - y.week));
+  return log;
+}
+function statTable(headers, rows) {
+  if (!rows.length) return '<p style="color:var(--muted);">Nothing yet.</p>';
+  return `<div class="mid-scroll"><table class="standings-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${headers[i] === 'Team' ? ' class="standings-team"' : ''}>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+const tn = (team, conf) => `${team} <span style="color:var(--muted);font-size:11px">${conf}</span>`;
+const f1 = v => v.toFixed(1);
+
+function superlativeBlocks(games, log) {
+  const scores = [];
+  games.forEach(g => {
+    scores.push({ t: g.a, conf: g.conf, week: g.week, s: g.sa, o: g.b, os: g.sb });
+    scores.push({ t: g.b, conf: g.conf, week: g.week, s: g.sb, o: g.a, os: g.sa });
+  });
+  const top = (arr, n, fn) => [...arr].sort(fn).slice(0, n);
+  const row = (x, extra) => [`Wk ${x.week}`, tn(x.t, x.conf), f1(x.s), `${x.o}`, f1(x.os), ...(extra ? [extra] : [])];
+  const hi = top(scores, 5, (a, b) => b.s - a.s).map(x => row(x));
+  const lo = top(scores, 5, (a, b) => a.s - b.s).map(x => row(x));
+  const blow = top(scores.filter(x => x.s > x.os), 5, (a, b) => (b.s - b.os) - (a.s - a.os)).map(x => row(x, '+' + f1(x.s - x.os)));
+  const close = top(scores.filter(x => x.s > x.os), 5, (a, b) => (a.s - a.os) - (b.s - b.os)).map(x => row(x, '+' + f1(x.s - x.os)));
+  const loseHi = top(scores.filter(x => x.s < x.os), 5, (a, b) => b.s - a.s).map(x => row(x));
+  const winLo = top(scores.filter(x => x.s > x.os), 5, (a, b) => a.s - b.s).map(x => row(x));
+  const H = ['Week', 'Team', 'Score', 'Opponent', 'Their score'];
+  // projection beats / misses
+  const dev = [];
+  games.forEach(g => { dev.push({ t: g.a, conf: g.conf, week: g.week, s: g.sa, p: g.pa }); dev.push({ t: g.b, conf: g.conf, week: g.week, s: g.sb, p: g.pb }); });
+  const beat = top(dev, 5, (a, b) => (b.s - b.p) - (a.s - a.p)).map(x => [`Wk ${x.week}`, tn(x.t, x.conf), f1(x.p), f1(x.s), '+' + f1(x.s - x.p)]);
+  const miss = top(dev, 5, (a, b) => (a.s - a.p) - (b.s - b.p)).map(x => [`Wk ${x.week}`, tn(x.t, x.conf), f1(x.p), f1(x.s), f1(x.s - x.p)]);
+  const HD = ['Week', 'Team', 'Projected', 'Actual', 'Diff'];
+  // streaks
+  const streaks = [];
+  Object.values(log).forEach(l => {
+    let cur = 0, curType = null, best = { w: 0, l: 0 };
+    l.forEach(x => {
+      const type = x.win ? 'w' : 'l';
+      cur = type === curType ? cur + 1 : 1; curType = type;
+      if (cur > best[type]) best[type] = cur;
+    });
+    streaks.push({ t: l[0].team, conf: l[0].conf, bw: best.w, bl: best.l, now: curType === 'w' ? cur + 'W' : cur + 'L' });
+  });
+  const ws = top(streaks, 5, (a, b) => b.bw - a.bw).map(x => [tn(x.t, x.conf), x.bw, x.now]).map(r => ['', ...r].slice(1));
+  const ls = top(streaks, 5, (a, b) => b.bl - a.bl).map(x => [tn(x.t, x.conf), x.bl, x.now]);
+  const block = (title, headers, rows) => `<div class="award-card" style="text-align:left;"><div class="award-label">${title}</div>${statTable(headers, rows)}</div>`;
+  const grid = items => `<div class="awards-grid" style="grid-template-columns: repeat(auto-fit, minmax(min(100%, 470px), 1fr));">${items.join('')}</div>`;
+  return grid([
+    block('Highest scores', H, hi), block('Lowest scores', H, lo),
+    block('Biggest blowouts', [...H, 'Margin'], blow), block('Closest finishes', [...H, 'Margin'], close),
+    block('Most points in a loss', H, loseHi), block('Fewest points in a win', H, winLo),
+    block('Beat projection by most', HD, beat), block('Missed projection by most', HD, miss),
+    block('Longest win streak', ['', 'Team', 'Best', 'Now'].slice(1), ws.map(r => r)), block('Longest losing streak', ['Team', 'Worst', 'Now'], ls)
+  ]);
+}
+
+// Weekly finish within each league (TT+DD, RR+PP): who owns 1st, 2nd, last
+function weeklyFinishTable(games) {
+  const byKey = {}; // week|group -> [{conf, team, s}]
+  games.forEach(g => {
+    const k = g.week + '|' + LEAGUE_GROUP[g.conf];
+    (byKey[k] = byKey[k] || []).push({ conf: g.conf, team: g.a, s: g.sa }, { conf: g.conf, team: g.b, s: g.sb });
+  });
+  const tot = {};
+  Object.values(byKey).forEach(arr => {
+    arr.sort((a, b) => b.s - a.s);
+    arr.forEach((x, i) => {
+      const k = x.conf + '|' + x.team;
+      const t = tot[k] = tot[k] || { conf: x.conf, team: x.team, first: 0, second: 0, third: 0, last: 0, games: 0 };
+      t.games++;
+      if (i === 0) t.first++; else if (i === 1) t.second++; else if (i === 2) t.third++;
+      if (i === arr.length - 1) t.last++;
+    });
+  });
+  const rows = Object.values(tot).sort((a, b) => b.first - a.first || b.second - a.second || b.third - a.third || a.last - b.last)
+    .map(t => [tn(t.team, t.conf), t.first, t.second, t.third, t.last, t.games]);
+  return statTable(['', 'Team', '1st', '2nd', '3rd', 'Last', 'Games'].slice(1), rows);
+}
+
+function luckTable(log) {
+  const rows = [];
+  const weekAP = {}; // conf|week -> list of scores
+  Object.values(log).forEach(l => l.forEach(x => { (weekAP[x.conf + '|' + x.week] = weekAP[x.conf + '|' + x.week] || []).push(x.pf); }));
+  Object.values(log).forEach(l => {
+    let apW = 0, apG = 0;
+    l.forEach(x => { weekAP[x.conf + '|' + x.week].forEach(s => { if (s === x.pf) return; apG++; if (x.pf > s) apW++; }); });
+    const w = l.filter(x => x.win).length, g = l.length;
+    const exp = apG ? (apW / apG) * g : 0;
+    rows.push({ t: l[0].team, conf: l[0].conf, w, g, apW, apG, exp, luck: w - exp });
+  });
+  rows.sort((a, b) => b.luck - a.luck);
+  return statTable(['', 'Team', 'Record', 'All-play', 'Expected wins', 'Luck'].slice(1),
+    rows.map(r => [tn(r.t, r.conf), `${r.w}-${r.g - r.w}`, `${r.apW}-${r.apG - r.apW}`, f1(r.exp), luckLabel(r.luck)]));
+}
+
+function projBeaters(log) {
+  const rows = Object.values(log).map(l => {
+    const g = l.length;
+    const diffs = l.map(x => x.pf - x.proj);
+    const beats = diffs.filter(d => d > 0).length;
+    const called = l.filter(x => (x.proj > x.oproj) === x.win).length;
+    return { t: l[0].team, conf: l[0].conf, g, avgS: midMean(l.map(x => x.pf)), avgP: midMean(l.map(x => x.proj)), avg: midMean(diffs), beats, sd: midSd(diffs), called };
+  }).sort((a, b) => b.avg - a.avg);
+  return statTable(['', 'Team', 'Avg projected', 'Avg actual', 'Avg diff', 'Beat proj.', 'Swing (SD)', 'Projection called their game'].slice(1),
+    rows.map(r => [tn(r.t, r.conf), f1(r.avgP), f1(r.avgS), (r.avg > 0 ? '+' : '') + f1(r.avg), `${r.beats}/${r.g}`, f1(r.sd), `${r.called}/${r.g}`]));
+}
+
+// Pre-game win chance: projected gap vs typical miss between projection and actual
+function pregameSd() {
+  const r = [];
+  statGames().forEach(g => { r.push(g.sa - g.pa, g.sb - g.pb); });
+  if (r.length < 10) return 35 * Math.SQRT2;
+  return Math.max(15, Math.sqrt(midMean(r.map(x => x * x)))) * Math.SQRT2;
+}
+function pregameProbA(m, sd) { return normCdf((m.totalA - m.totalB) / (sd || pregameSd())); }
+function preGameStrip(m) {
+  if (m.missingSide || m.margin === null || typeof m.totalA !== 'number') return '';
+  if (m.pending && m.liveInfo) return '';
+  const sd = pregameSd();
+  const pa = Math.round(pregameProbA(m, sd) * 100), pb = 100 - pa;
+  let note = '';
+  if (!m.pending && typeof m.actualTotalA === 'number' && pa !== pb) {
+    if ((m.actualTotalA > m.actualTotalB) !== (pa > pb)) note = ' · <b>Upset</b>';
+  }
+  return `<div class="live-strip">
+    <div class="live-title">Pre-game win chance${note}</div>
+    <div style="display:flex;justify-content:space-between;font-weight:600;margin:6px 0"><span>${stripConf(m.teamA)} ${pa}%</span><span>${pb}% ${stripConf(m.teamB)}</span></div>
+    <div class="tally-track"><div class="tally-fill-a" style="width:${pa}%"></div><div class="tally-fill-b" style="width:${pb}%"></div></div>
+    <div class="live-note">From the projected gap and how far real scores have typically landed from projection this season (about ±${(sd / Math.SQRT2).toFixed(0)} pts per team).</div>
+  </div>`;
+}
+function calibrationTable(games) {
+  const sd = pregameSd();
+  const b = [[0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 1.01]].map(([lo, hi]) => ({ lo, hi, n: 0, fav: 0, exp: 0 }));
+  games.forEach(g => {
+    const pA = normCdf((g.pa - g.pb) / sd), fav = Math.max(pA, 1 - pA);
+    const favWon = (pA >= 0.5) === (g.sa > g.sb);
+    const k = b.find(x => fav >= x.lo && fav < x.hi); if (!k) return;
+    k.n++; if (favWon) k.fav++; k.exp += fav;
+  });
+  return statTable(['Model favorite chance', 'Games', 'Favorite actually won', 'Model expected'],
+    b.filter(x => x.n).map(x => [`${Math.round(x.lo * 100)}–${x.hi > 1 ? 100 : Math.round(x.hi * 100)}%`, x.n, `${Math.round(100 * x.fav / x.n)}%`, `${Math.round(100 * x.exp / x.n)}%`]));
+}
+
+function renderLeagueStats() {
+  const el = document.getElementById('leagueStats');
+  const games = statGames();
+  if (!games.length) { el.innerHTML = '<p style="color:var(--muted);">No completed games yet.</p>'; return; }
+  const log = statTeamLog(games);
+  const wks = [...new Set(games.map(g => g.week))];
+  el.innerHTML = `
+    <div class="hub-section-title">Season Superlatives — all four conferences · Weeks ${Math.min(...wks)}–${Math.max(...wks)}</div>
+    ${superlativeBlocks(games, log)}
+    <div class="hub-section-title">Weekly Finish — 1st, 2nd, 3rd &amp; last in your league each week</div>
+    <p class="allplay-note" style="margin-top:0">Ranks every team against its whole MFL league each week (TT+DD together, RR+PP together). Same stat for every team.</p>
+    <div style="max-height:560px;overflow:auto;">${weeklyFinishTable(games)}</div>
+    <div class="hub-section-title">Luck Index — every team</div>
+    <p class="allplay-note" style="margin-top:0">Expected wins = all-play win% (vs. the other 11 teams in the conference each week) × games played. Luck = actual wins minus expected wins.</p>
+    <div style="max-height:560px;overflow:auto;">${luckTable(log)}</div>
+    <div class="hub-section-title">Projection Beaters — who outscores the projection</div>
+    <p class="allplay-note" style="margin-top:0">Compares each team's actual weekly total with the projected total for the lineup it started. Positive means the lineup out-produced its projection.</p>
+    <div style="max-height:560px;overflow:auto;">${projBeaters(log)}</div>
+    <div class="hub-section-title">How Reliable Are the Win Chances?</div>
+    <p class="allplay-note" style="margin-top:0">Each matchup card shows a pre-game win chance. This checks it against results so far: when the model said a team was a 70% favorite, how often did the favorite win?</p>
+    ${calibrationTable(games)}`;
+}
+
+function renderPlayoffTab() {
+  const el = document.getElementById('playoffTab');
+  el.innerHTML = `
+    <div class="hub-section-title">Playoff Picture — ${currentConf} · Weeks 13–16</div>
+    ${renderPlayoffPicture(currentConf)}
+    ${renderPlayoffRules()}`;
 }
 
 renderAll();
