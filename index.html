@@ -2029,6 +2029,59 @@ function playoffSim(conf, G) {
   return { rows, divs, res, today, remaining, played, realWeeks, LAP };
 }
 
+
+// ===================================================================
+// Bill's Playoff Preview (Week 12) — per-team scenario notes pulled from his article
+// and mapped by the commish. Static text shown as a column in the playoff table.
+// ===================================================================
+const BILL_PREVIEW = {
+  week: 12,
+  notes: {
+    DD: {
+      'Whiskey Creek Gadabouts': ['bye','Clinched a bye'],
+      'England Dragons': ['bye','Clinched a bye'],
+      'Titletown Tyrants': ['in','Clinched a playoff spot'],
+      'Atlanta Africans': ['in','Clinched a playoff spot'],
+      'Muskego Muskies': ['safe','Should have clinched long ago and now Week 12 actually matters, but still confidently in'],
+      'Minnesota Eternals': ['weird','Has to do the weird thing and root for Dan this weekend, but still likely in'],
+      'ToonTown Warlocks': ['chance',"You're telling me there's a chance"],
+      'Las Vegas Degenerates': ['chance',"You're telling me there's a chance"],
+      'Indiana Mayhem': ['out','Looking to the future'],
+      'California Nightmare': ['out','Looking to the future'],
+      'Littleton SilverBallers': ['out','Looking to the future'],
+      'Nevada Nighthawks': ['out','Looking to the future']
+    },
+    TT: {
+      'Philadelphia Pigskins': ['bye','Clinched a bye'],
+      'Colorado Crusaders': ['in','Clinched a playoff spot'],
+      'Rocky Mountain Oysters': ['in','Clinched a playoff spot'],
+      'Hatteras Bay Mad Goats': ['safe','More than likely in. At risk only if the Arsenic upset the Pigskins and the Steel Cats win (Arsenic would take the #5 seed)'],
+      'Tenafly Vipers': ['safe','More than likely in, but an Arsenic leap over the Mad Goats would likely end it (Vipers trail the Goats by 21 all-play games)'],
+      'Hamilton Steel Cats': ['safe','More than likely in. At risk only if the Arsenic upset the Pigskins, the Mad Goats win, and Alaska outscores them by 33+'],
+      'Alaska Arsenic': ['chance','Outside chance. Likely needs to upset the Pigskins; 6-6 won\'t do it (204.96 pts behind the Mad Goats, 19 all-play games behind the Vipers)'],
+      'Maplewood Doppelgangers': ['out','Eliminated'],
+      'Kane County Goon Squad': ['out','Eliminated'],
+      'San Francisco Golddiggers': ['out','Eliminated'],
+      'Tarpon Springs Redknights': ['out','Looking to the future'],
+      'Charm City Justice': ['out','Looking to the future']
+    }
+  },
+  tag: { bye: '🏆', in: '✅', safe: '👍', weird: '📣', chance: '🎲', out: '🔭' }
+};
+(function(){
+  const st = document.createElement('style');
+  st.textContent = `
+  .bp-cell{min-width:200px;max-width:300px;font-size:12px;line-height:1.35;white-space:normal}
+  .bp-tag{margin-right:5px}
+  .bp-bye .bp-t,.bp-in .bp-t{font-weight:600}
+  .bp-credit{font-size:13px;margin:10px 0 0;padding:8px 12px;border-left:3px solid var(--green);background:rgba(127,127,127,.08);border-radius:4px}`;
+  document.head.appendChild(st);
+})();
+function billNote(conf, name) {
+  const n = (BILL_PREVIEW.notes[conf] || {})[name];
+  return n ? `<span class="bp-${n[0]}"><span class="bp-tag">${BILL_PREVIEW.tag[n[0]]}</span><span class="bp-t">${n[1]}</span></span>` : '';
+}
+
 function renderPlayoffPicture(conf) {
   const G = midGames();
   if (!G[conf]) return '<p style="color:var(--muted);">No completed games yet.</p>';
@@ -2039,6 +2092,7 @@ function renderPlayoffPicture(conf) {
   list.sort((a, b) => (a.t ? a.t.seed : 99) - (b.t ? b.t.seed : 99) || b.x.make - a.x.make || b.r.wins - a.r.wins || b.r.pf - a.r.pf);
   const status = e => e.x.make >= 0.9995 ? '<span class="luck-pos">In</span>' : e.x.make < 0.0005 ? '<span class="luck-neg">Out</span>' : '';
   let outRank = 0;
+  const hasBill = !!BILL_PREVIEW.notes[conf];
   const body = list.map(e => {
     const seed = e.t ? '#' + e.t.seed : '–';
     const route = e.t ? e.t.route : '';
@@ -2051,11 +2105,12 @@ function renderPlayoffPicture(conf) {
       <td>${e.r.pf.toFixed(1)}</td>
       <td>${(o.LAP[conf + '|' + e.r.name] || { w: 0, l: 0 }).w}-${(o.LAP[conf + '|' + e.r.name] || { w: 0, l: 0 }).l}</td>
       <td><div class="odds-bar"><div style="width:${(e.x.make * 100).toFixed(0)}%"></div></div> <b>${p(e.x.make)}</b> ${status(e)}</td>
-      <td>${p(e.x.div)}</td><td>${p(e.x.bye)}</td><td>${p(e.x.seed1)}</td></tr>`;
+      <td>${p(e.x.div)}</td><td>${p(e.x.bye)}</td><td>${p(e.x.seed1)}</td>${hasBill ? `<td class="bp-cell">${billNote(conf, e.r.name)}</td>` : ''}</tr>`;
   }).join('');
   return `<div class="mid-scroll"><table class="standings-table"><thead><tr>
-      <th title="Seed and route if the regular season ended today">Seed now</th><th>Team</th><th>Division</th><th>Record</th><th>PF</th><th title="Record vs. all 24 teams in the MFL league each week — the number used for the all-play spot">All-Play (24)</th><th>Make playoffs</th><th>Div. title</th><th>Bye</th><th>#1 seed</th>
+      <th title="Seed and route if the regular season ended today">Seed now</th><th>Team</th><th>Division</th><th>Record</th><th>PF</th><th title="Record vs. all 24 teams in the MFL league each week — the number used for the all-play spot">All-Play (24)</th><th>Make playoffs</th><th>Div. title</th><th>Bye</th><th>#1 seed</th>${hasBill ? '<th title="From Bill’s Playoff Preview article">Bill’s Preview ✍️</th>' : ''}
     </tr></thead><tbody>${body}</tbody></table></div>
+    ${hasBill ? `<div class="bp-credit">The <b>Bill’s Preview</b> column comes from <b>Bill’s Playoff Preview</b> article (Week ${BILL_PREVIEW.week}); I mapped his scenarios onto the table. The percentages beside it are the site’s own simulation.</div>` : ''}
     <p class="allplay-note">${PLAYOFF_SIMS.toLocaleString()} simulated finishes. ${o.remaining} regular-season week${o.remaining === 1 ? '' : 's'} left (through Week ${REG_SEASON_WEEKS}). ${o.realWeeks >= o.remaining ? 'Uses the real remaining schedule.' : 'Uses the real schedule where the sheet has it, random pairings otherwise.'}
     Six per conference qualify: 3 division winners, then the next 2 best by wins (ties by points), then the best league-wide all-play record (vs. all 24 teams in the MFL league each week) among the rest. Seeds go by wins, then points. “In”/“Out” means virtually certain in the simulations (over 99.95% / under 0.05%). Future scores are drawn from each team's scoring average (blended with the conference's) and typical week-to-week swing.</p>`;
 }
